@@ -9,6 +9,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
+
 def vr(n):
     d = []
     while True:
@@ -20,6 +21,7 @@ def vr(n):
         if not n:
             break
     return bytes(d)
+
 
 def pb(F):
     p = bytearray()
@@ -42,6 +44,7 @@ def pb(F):
             p.extend(d)
     return bytes(p)
 
+
 def rv(data, pos):
     r = 0
     s = 0
@@ -53,6 +56,7 @@ def rv(data, pos):
             break
         s += 7
     return r, pos
+
 
 def parse(data):
     f = {}
@@ -85,9 +89,11 @@ def parse(data):
         f.setdefault(fn, []).append(v)
     return f
 
+
 def enc(k, i, p):
     pl = 16 - (len(p) % 16)
     return AES.new(k, AES.MODE_CBC, i).encrypt(p + bytes([pl] * pl))
+
 
 def strip_prefix(b):
     if len(b) <= 64:
@@ -103,6 +109,7 @@ def strip_prefix(b):
     except Exception:
         pass
     return b[64:]
+
 
 def oauth(uid, pwd):
     H = {
@@ -140,7 +147,8 @@ def oauth(uid, pwd):
         return None
     return d
 
-def get_jwt(uid, pwd):
+
+def get_jwt(uid, pwd, forced_server=None):
     acc = oauth(uid, pwd)
     if not acc:
         return None
@@ -238,10 +246,14 @@ def get_jwt(uid, pwd):
     s = f.get(10, [None])[0]
     if not isinstance(j, bytes):
         return None
-    server = s.decode() if isinstance(s, bytes) else "https://clientbp.ppmainecoonghj.com"
+    if forced_server:
+        server = forced_server.strip()
+    else:
+        server = s.decode() if isinstance(s, bytes) else "https://clientbp.ppmainecoonghj.com"
     if not server.startswith("http"):
         server = "https://" + server
-    return j.decode(), server
+    return j.decode(), server.rstrip("/")
+
 
 def send_like(jwt, uid, server):
     H = {
@@ -258,14 +270,20 @@ def send_like(jwt, uid, server):
     }
     p = enc(b"Yg&tc%DEuh6%Zc^8", b"6oyZDr22E3ychjM%", pb({1: int(uid), 2: "ME"}))
     url = server + "/LikeProfile"
+    last_info = {"http_status": None, "response_preview": None}
     for _ in range(3):
         try:
             R = requests.post(url, data=p, headers=H, timeout=10, verify=False)
+            last_info = {
+                "http_status": R.status_code,
+                "response_preview": R.text[:150] if R.text else f"<bytes:{len(R.content)}>",
+            }
             if R.status_code == 200:
-                return True
-        except Exception:
-            pass
-    return False
+                return True, last_info
+        except Exception as e:
+            last_info = {"http_status": None, "response_preview": str(e)[:150]}
+    return False, last_info
+
 
 def load_accounts():
     accounts = []
@@ -288,22 +306,38 @@ def load_accounts():
             accounts.append((uid, pwd))
     return accounts
 
-def process_likes(target_uid):
+
+def resolve_server(region_or_server):
+    if not region_or_server:
+        return None
+    val = str(region_or_server).strip().lower()
+    mapping = {
+        "mea": "https://clientbp.freefiremobile.com",
+        "mena": "https://clientbp.freefiremobile.com",
+        "me": "https://clientbp.freefiremobile.com",
+        "us": "https://client.us.freefiremobile.com",
+    }
+    return mapping.get(val, str(region_or_server).strip())
+
+
+def process_likes(target_uid, region_or_server=None):
+    forced_server = resolve_server(region_or_server)
     results = []
     success_count = 0
     for uid, pwd in load_accounts():
-        res = get_jwt(uid, pwd)
+        res = get_jwt(uid, pwd, forced_server=forced_server)
         if not res:
             results.append({"uid": uid, "status": "jwt_fail"})
             continue
         jwt, server = res
-        ok = send_like(jwt, target_uid, server)
+        ok, info = send_like(jwt, target_uid, server)
         if ok:
             success_count += 1
         results.append({
             "uid": uid,
             "server": server,
             "status": "ok" if ok else "fail",
+            "detail": info,
         })
     return {
         "target_uid": str(target_uid),
@@ -312,14 +346,23 @@ def process_likes(target_uid):
         "results": results,
     }
 
+
 @app.route("/like", methods=["GET", "POST"])
 @app.route("/like&uid=<target_uid>", methods=["GET", "POST"])
 def like_endpoint(target_uid=None):
-    uid = target_uid or request.args.get("uid") or (request.get_json(silent=True) or {}).get("uid")
+    body = request.get_json(silent=True) or {}
+    uid = target_uid or request.args.get("uid") or body.get("uid")
+    server_param = (
+        request.args.get("server")
+        or request.args.get("region")
+        or body.get("server")
+        or body.get("region")
+    )
     if not uid or not str(uid).strip().isdigit():
-        return jsonify({"error": "يرجى تمرير uid صحيح مثال: /like?uid=123456"}), 400
-    data = process_likes(str(uid).strip())
+        return jsonify({"error": "ÙØ±Ø¬Ù ØªÙØ±ÙØ± uid ØµØ­ÙØ­ ÙØ«Ø§Ù: /like?uid=123456"}), 400
+    data = process_likes(str(uid).strip(), region_or_server=server_param)
     return jsonify(data), 200
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
